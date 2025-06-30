@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "LZW.h"
 
 LZW_DATA lzw1, *lzw;
@@ -13,18 +14,70 @@ void init_compression() {
     lzw->max_code = MAX_CODE(lzw->current_bits);
     lzw->bit_buffer = 0;
     lzw->bit_count = 0;
+    lzw->input_bytes = 0;
+    lzw->output_bytes = 0;
+    lzw->current_ratio = 1.0;
 
     if (!(lzw->code = (int*)malloc(TABLE_SIZE * sizeof(int))) ||
         !(lzw->prefix = (unsigned int*)malloc(TABLE_SIZE * sizeof(unsigned int))) ||
-        !(lzw->suffix = (unsigned char*)malloc(TABLE_SIZE * sizeof(unsigned char)))) {
+        !(lzw->suffix = (unsigned char*)malloc(TABLE_SIZE * sizeof(unsigned char))) ||
+        !(lzw->stats = (CharacterStats*)malloc(TABLE_SIZE * sizeof(CharacterStats)))) {
         printf("内存分配失败！\n");
         exit(0);
     }
 
-    // 初始化字典
+    // 初始化字典和统计信息
     for (int i = 0; i < TABLE_SIZE; i++) {
         lzw->code[i] = -1;
+        lzw->stats[i].frequency = 0;
+        lzw->stats[i].last_pos = 0;
+        lzw->stats[i].compression_ratio = 1.0;
     }
+}
+
+// 更新统计信息
+void update_stats(unsigned int code) {
+    lzw->stats[code].frequency++;
+    lzw->stats[code].last_pos = lzw->input_bytes;
+    
+    // 更新局部压缩率
+    if (lzw->input_bytes > 0) {
+        lzw->current_ratio = (float)lzw->output_bytes / lzw->input_bytes;
+        lzw->stats[code].compression_ratio = lzw->current_ratio;
+    }
+}
+
+// 检查是否需要重置字典
+int should_reset_dictionary() {
+    // 如果达到最大位宽且压缩率低于阈值
+    if (lzw->current_bits >= MAX_BITS && 
+        lzw->current_ratio > COMPRESSION_THRESHOLD) {
+        return 1;
+    }
+    
+    // 检查最近的压缩效率
+    if (lzw->next_code % RESET_CHECK_INTERVAL == 0) {
+        float recent_ratio = 0;
+        int count = 0;
+        
+        // 计算最近的压缩效率
+        for (int i = lzw->next_code - RESET_CHECK_INTERVAL; 
+             i < lzw->next_code; i++) {
+            if (lzw->stats[i].frequency > 0) {
+                recent_ratio += lzw->stats[i].compression_ratio;
+                count++;
+            }
+        }
+        
+        if (count > 0) {
+            recent_ratio /= count;
+            if (recent_ratio > COMPRESSION_THRESHOLD) {
+                return 1;
+            }
+        }
+    }
+    
+    return 0;
 }
 
 // 重置字典
@@ -35,24 +88,27 @@ void reset_dictionary() {
     
     for (int i = 0; i < TABLE_SIZE; i++) {
         lzw->code[i] = -1;
+        // 保留频率信息，但重置其他统计
+        lzw->stats[i].last_pos = 0;
+        lzw->stats[i].compression_ratio = 1.0;
     }
 }
 
 // 在字典中查找
 unsigned int find_in_dictionary(int prefix, unsigned int suffix) {
-    int index = (suffix << (MAX_BITS-8)) ^ prefix;
-    int offset = (index == 0) ? 1 : TABLE_SIZE - index;
+    unsigned int hash = ((prefix << 8) | suffix) % TABLE_SIZE;
+    unsigned int orig_hash = hash;
     
     while (1) {
-        if (lzw->code[index] == -1) {
+        if (lzw->code[hash] == -1) {
             return -1;  // 未找到
         }
-        if (lzw->prefix[index] == prefix && lzw->suffix[index] == suffix) {
-            return lzw->code[index];  // 找到匹配项
+        if (lzw->prefix[hash] == prefix && lzw->suffix[hash] == suffix) {
+            return lzw->code[hash];  // 找到匹配项
         }
-        index -= offset;
-        if (index < 0) {
-            index += TABLE_SIZE;
+        hash = (hash + 1) % TABLE_SIZE;  // 线性探测
+        if (hash == orig_hash) {
+            return -1;  // 表已满
         }
     }
 }
@@ -66,6 +122,7 @@ void output_code(FILE *output, unsigned int code) {
         putc(lzw->bit_buffer & 0xFF, output);
         lzw->bit_buffer >>= 8;
         lzw->bit_count -= 8;
+        lzw->output_bytes++;
     }
 }
 
@@ -80,15 +137,20 @@ void compress(FILE *input, FILE *output) {
     output_code(output, CLEAR_CODE);
     
     prefix = getc(input);
+    lzw->input_bytes++;
+    
     while ((suffix = getc(input)) != (unsigned)EOF) {
+        lzw->input_bytes++;
         index = find_in_dictionary(prefix, suffix);
         
         if (index != -1) {
             // 找到匹配项，继续查找更长的匹配
             prefix = index;
+            update_stats(index);
         } else {
             // 输出前缀编码
             output_code(output, prefix);
+            update_stats(prefix);
             
             // 检查是否需要增加位宽或重置字典
             if (lzw->next_code > lzw->max_code) {
@@ -96,8 +158,8 @@ void compress(FILE *input, FILE *output) {
                     // 增加位宽
                     lzw->current_bits++;
                     lzw->max_code = MAX_CODE(lzw->current_bits);
-                } else {
-                    // 字典已满，输出CLEAR_CODE并重置
+                } else if (should_reset_dictionary()) {
+                    // 字典效率低，需要重置
                     output_code(output, CLEAR_CODE);
                     reset_dictionary();
                 }
@@ -105,12 +167,9 @@ void compress(FILE *input, FILE *output) {
 
             // 将新字符串加入字典
             if (lzw->next_code < TABLE_SIZE) {
-                index = (suffix << (MAX_BITS-8)) ^ prefix;
-                int offset = (index == 0) ? 1 : TABLE_SIZE - index;
-                
+                index = ((prefix << 8) | suffix) % TABLE_SIZE;
                 while (lzw->code[index] != -1) {
-                    index -= offset;
-                    if (index < 0) index += TABLE_SIZE;
+                    index = (index + 1) % TABLE_SIZE;
                 }
                 
                 lzw->code[index] = lzw->next_code++;
@@ -124,6 +183,7 @@ void compress(FILE *input, FILE *output) {
     
     // 输出最后的前缀
     output_code(output, prefix);
+    update_stats(prefix);
     
     // 输出END_CODE
     output_code(output, END_CODE);
@@ -131,12 +191,14 @@ void compress(FILE *input, FILE *output) {
     // 清空位缓冲区
     if (lzw->bit_count > 0) {
         putc(lzw->bit_buffer & 0xFF, output);
+        lzw->output_bytes++;
     }
     
     // 释放内存
     free(lzw->code);
     free(lzw->prefix);
     free(lzw->suffix);
+    free(lzw->stats);
 }
 
 // 初始化解压缩
