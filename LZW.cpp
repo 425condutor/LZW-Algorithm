@@ -6,6 +6,50 @@
 LZW_DATA lzw1, *lzw;
 unsigned char decode_stack[TABLE_SIZE];  // 用于保存解压缩后的数据
 
+// 打印压缩统计信息
+void print_compression_stats() {
+    printf("\n=== 压缩统计信息 ===\n");
+    printf("输入字节数: %lu\n", lzw->input_bytes);
+    printf("输出字节数: %lu\n", lzw->output_bytes);
+    printf("当前压缩率: %.2f%%\n", (1 - (float)lzw->output_bytes/lzw->input_bytes) * 100);
+    printf("当前字典大小: %d\n", lzw->next_code - FIRST_CODE);
+    printf("当前位宽: %d bits\n", lzw->current_bits);
+    
+    // 打印最常用的前10个编码
+    printf("\n最常用的编码:\n");
+    typedef struct {
+        int code;
+        int freq;
+    } CodeFreq;
+    CodeFreq top_codes[10] = {0};
+    
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (lzw->code[i] != -1) {
+            for (int j = 0; j < 10; j++) {
+                if (lzw->stats[i].frequency > top_codes[j].freq) {
+                    // 移动数组
+                    for (int k = 9; k > j; k--) {
+                        top_codes[k] = top_codes[k-1];
+                    }
+                    top_codes[j].code = i;
+                    top_codes[j].freq = lzw->stats[i].frequency;
+                    break;
+                }
+            }
+        }
+    }
+    
+    for (int i = 0; i < 10; i++) {
+        if (top_codes[i].freq > 0) {
+            printf("编码 %d: 使用次数 %d, 局部压缩率 %.2f%%\n", 
+                   top_codes[i].code,
+                   top_codes[i].freq,
+                   (1 - lzw->stats[top_codes[i].code].compression_ratio) * 100);
+        }
+    }
+    printf("========================\n\n");
+}
+
 // 初始化压缩
 void init_compression() {
     lzw = &lzw1;
@@ -130,8 +174,10 @@ void output_code(FILE *output, unsigned int code) {
 void compress(FILE *input, FILE *output) {
     unsigned int prefix, suffix;
     int index;
+    int output_counter = 0;  // 用于控制统计信息输出频率
 
     init_compression();
+    printf("\n开始压缩...\n");
     
     // 输出初始CLEAR_CODE
     output_code(output, CLEAR_CODE);
@@ -143,29 +189,32 @@ void compress(FILE *input, FILE *output) {
         lzw->input_bytes++;
         index = find_in_dictionary(prefix, suffix);
         
+        // 每处理1000个字符输出一次统计
+        if (++output_counter >= 1000) {
+            print_compression_stats();
+            output_counter = 0;
+        }
+        
         if (index != -1) {
-            // 找到匹配项，继续查找更长的匹配
             prefix = index;
             update_stats(index);
         } else {
-            // 输出前缀编码
             output_code(output, prefix);
             update_stats(prefix);
             
-            // 检查是否需要增加位宽或重置字典
             if (lzw->next_code > lzw->max_code) {
                 if (lzw->current_bits < MAX_BITS) {
-                    // 增加位宽
                     lzw->current_bits++;
                     lzw->max_code = MAX_CODE(lzw->current_bits);
+                    printf("\n位宽增加到 %d bits\n", lzw->current_bits);
                 } else if (should_reset_dictionary()) {
-                    // 字典效率低，需要重置
+                    printf("\n字典重置（压缩率: %.2f%%）\n", 
+                           (1 - lzw->current_ratio) * 100);
                     output_code(output, CLEAR_CODE);
                     reset_dictionary();
                 }
             }
 
-            // 将新字符串加入字典
             if (lzw->next_code < TABLE_SIZE) {
                 index = ((prefix << 8) | suffix) % TABLE_SIZE;
                 while (lzw->code[index] != -1) {
@@ -181,20 +230,19 @@ void compress(FILE *input, FILE *output) {
         }
     }
     
-    // 输出最后的前缀
     output_code(output, prefix);
     update_stats(prefix);
-    
-    // 输出END_CODE
     output_code(output, END_CODE);
     
-    // 清空位缓冲区
     if (lzw->bit_count > 0) {
         putc(lzw->bit_buffer & 0xFF, output);
         lzw->output_bytes++;
     }
     
-    // 释放内存
+    // 输出最终统计信息
+    printf("\n压缩完成！\n");
+    print_compression_stats();
+    
     free(lzw->code);
     free(lzw->prefix);
     free(lzw->suffix);

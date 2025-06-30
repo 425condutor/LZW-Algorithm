@@ -1,0 +1,2 @@
+测试是否支持中文混合字符
+Test whether Chinese mixed characters are supported

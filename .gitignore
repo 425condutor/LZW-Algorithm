@@ -1,0 +1,15 @@
+# 编译生成的文件
+*.o
+*.exe
+
+# 压缩生成的文件
+*.lzw
+*.decoded
+
+# IDE相关文件
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db 
