@@ -3,10 +3,13 @@
 #include <string.h>
 #include "LZW.h"
 #include <windows.h>
+#include <time.h>
 
 int main(int argc, char *argv[]) {
 	FILE *input, *output;
 	char output_file[256];
+	clock_t start_time, end_time;
+	double compression_time, decompression_time;
 
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
@@ -34,8 +37,14 @@ int main(int argc, char *argv[]) {
 	}
 
 	printf("正在压缩文件 %s 到 %s...\n", argv[1], output_file);
+	
+	// 测量压缩时间
+	start_time = clock();
 	compress(input, output);
-	printf("\n压缩完成！\n");
+	end_time = clock();
+	compression_time = ((double)(end_time - start_time)) / CLOCKS_PER_SEC * 1000; // 转换为毫秒
+	
+	printf("\n压缩完成！用时: %.2f 毫秒\n", compression_time);
 
 	fclose(input);
 	fclose(output);
@@ -57,8 +66,17 @@ int main(int argc, char *argv[]) {
 	}
 
 	printf("正在解压文件到 %s...\n", output_file);
+	
+	// 测量解压缩时间
+	start_time = clock();
 	expand(input, output);
-	printf("\n解压完成！\n");
+	end_time = clock();
+	decompression_time = ((double)(end_time - start_time)) / CLOCKS_PER_SEC * 1000; // 转换为毫秒
+	
+	printf("\n解压完成！用时: %.2f 毫秒\n", decompression_time);
+	
+	// 输出CSV格式的时间数据，便于脚本解析
+	printf("TIMING_DATA,%s,%.2f,%.2f\n", argv[1], compression_time, decompression_time);
 
 	fclose(input);
 	fclose(output);
